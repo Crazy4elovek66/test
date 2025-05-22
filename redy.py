@@ -334,10 +334,15 @@ class TwitchClipFinderTab(QWidget):
 
             button = QPushButton("Скачать")
             button.setStyleSheet("padding: 4px 10px; font-weight: bold;")
-            button.clicked.connect(lambda _, url=clip['url']: self.download_clip(url))
+            button.clicked.connect(lambda _, url=clip['url'], ch=clip['channel'], title=clip['title']: 
+                       self.download_clip(url, {"channel": ch, "title": title}))
+
             self.table.setCellWidget(row_pos, 5, button)
 
         self.status_label.setText(f"Найдено клипов: {len(sorted_clips)}")
+        
+    def sanitize_filename(name):
+        return re.sub(r'[\\/:"*?<>|]+', '_', name)
     
     def download_selected_clips(self):
         selected_clips = []
@@ -438,18 +443,25 @@ class TwitchClipFinderTab(QWidget):
             QMessageBox.critical(self, "Ошибка", str(e))
 
         
-    def download_clip(self, clip_url):
-        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить клип как", "", "Видео (*.mp4)")
+    def download_clip(self, clip_url, clip_info):
+        # Формируем предложенное имя файла
+        suggested_name = f"{clip_info['channel']} - {clip_info['title']}.mp4"
+        
+        # Запускаем диалог сохранения с предложенным именем
+        save_path, _ = QFileDialog.getSaveFileName(self, "Сохранить клип как", suggested_name, "Видео (*.mp4)")
         if not save_path:
             return
 
         try:
+            # yt-dlp принимает путь с расширением, поэтому если пользователь не дописал .mp4, добавим
+            if not save_path.lower().endswith(".mp4"):
+                save_path += ".mp4"
+
             # Скачиваем с помощью yt-dlp
             subprocess.run(["yt-dlp", "-o", save_path, clip_url], check=True)
             QMessageBox.information(self, "Готово", "Клип успешно скачан.")
         except subprocess.CalledProcessError as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось скачать клип:\n{e}")
-
 
     def open_url(self, row, column):
         if column == 3:
@@ -634,44 +646,73 @@ class VideoEditorTab(QWidget):
         if face_rect:
             x, y, w, h = face_rect
 
-            # Масштабируем координаты
-            scaled_x = int(x * scale + offset_x)
-            scaled_y = int(y * scale + offset_y)
-            scaled_w = int(w * scale)
-            scaled_h = int(h * scale)
+            # Центр лица на исходном кадре
+            cx = x + w / 2
+            cy = y + h / 2
 
-            # Устанавливаем позицию и размер области
+            # Центр лица в координатах canvas
+            scaled_cx = int(cx * scale + offset_x)
+            scaled_cy = int(cy * scale + offset_y)
+
+            # Фиксированный размер области в пикселях canvas (настрой)
+            fixed_w, fixed_h = 320, 320  # или другой размер по желанию
+
+            # Координаты левого верхнего угла области (чтобы центр был в scaled_cx, scaled_cy)
+            area_x = int(scaled_cx - fixed_w / 2)
+            area_y = int(scaled_cy - fixed_h / 2)
+
             self.area1.setParent(self.canvas)
-            self.area1.setGeometry(scaled_x, scaled_y, scaled_w, scaled_h)
-            self.area1.rect = QRect(0, 0, scaled_w, scaled_h)
+            self.area1.setGeometry(area_x, area_y, fixed_w, fixed_h)
+            self.area1.rect = QRect(0, 0, fixed_w, fixed_h)
             self.area1.update()
             self.area1.show()
 
-            self.current_rect1 = QRect(scaled_x, scaled_y, scaled_w, scaled_h)
+            self.current_rect1 = QRect(area_x, area_y, fixed_w, fixed_h)
+
+
+        # Красная область всегда по центру с соотношением 16:9
+        self.setRedAreaCenter()
 
         self.save_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.progress.setValue(0)
         self.updatePreview()
         logger.info(f"Видео загружено: {path}")
-
     
-    def detect_person_region(self, frame):
-        mp_pose = mp.solutions.pose
-        with mp_pose.Pose(static_image_mode=True) as pose:
-            results = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    def setRedAreaCenter(self):
+        canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
 
-            if not results.pose_landmarks:
-                logger.warning("Человек не найден")
-                return None
+        aspect_ratio = 9 / 16
 
-            h, w, _ = frame.shape
-            xs = [lmk.x * w for lmk in results.pose_landmarks.landmark]
-            ys = [lmk.y * h for lmk in results.pose_landmarks.landmark]
-            x_min, x_max = int(min(xs)), int(max(xs))
-            y_min, y_max = int(min(ys)), int(max(ys))
+        scale_factor = 0.99  # можно пробовать 0.9, 0.95 или 1.0
 
-            return QRect(x_min, y_min, x_max - x_min, y_max - y_min)
+        if canvas_w / canvas_h > aspect_ratio:
+            # canvas шире, ограничиваем по высоте
+            area_h = int(canvas_h * scale_factor)
+            area_w = int(area_h * aspect_ratio)
+        else:
+            # canvas выше, ограничиваем по ширине
+            area_w = int(canvas_w * scale_factor)
+            area_h = int(area_w / aspect_ratio)
+
+        # Проверка на выход за границы (на всякий случай)
+        if area_w > canvas_w:
+            area_w = canvas_w
+            area_h = int(area_w / aspect_ratio)
+        if area_h > canvas_h:
+            area_h = canvas_h
+            area_w = int(area_h * aspect_ratio)
+
+        x = (canvas_w - area_w) // 2
+        y = (canvas_h - area_h) // 2
+
+        self.area2.setParent(self.canvas)
+        self.area2.setGeometry(x, y, area_w, area_h)
+        self.area2.rect = QRect(0, 0, area_w, area_h)
+        self.area2.update()
+        self.area2.show()
+
+        self.current_rect2 = QRect(x, y, area_w, area_h)
             
     def setInitialRect(self, rect: QRect):
         if hasattr(self, "draggable_rect"):
@@ -974,7 +1015,7 @@ class VideoCuttingThread(QThread):
 
         os.remove(input_path)
         
-    @staticmethod    
+        
     def sanitize_filename(name):
         return re.sub(r'[\\/:"*?<>|]+', '_', name)    
 
