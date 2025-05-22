@@ -940,11 +940,7 @@ class VideoCuttingThread(QThread):
 
     @staticmethod
     def split_video_ffmpeg_only(input_path, chunk_duration=180):
-        """
-        Разбивает видео на части по chunk_duration секунд с помощью только ffmpeg.
-        Сохраняет части с нумерацией и удаляет исходный файл.
-        """
-        # Получаем длительность видео (в секундах)
+
         try:
             result = subprocess.run(
                 ['ffprobe', '-v', 'error', '-show_entries',
@@ -978,6 +974,7 @@ class VideoCuttingThread(QThread):
 
         os.remove(input_path)
         
+    @staticmethod    
     def sanitize_filename(name):
         return re.sub(r'[\\/:"*?<>|]+', '_', name)    
 
@@ -992,9 +989,25 @@ class VideoCuttingThread(QThread):
         duration = total_frames / fps
         logger.info(f"Всего кадров: {total_frames}, длительность: {duration:.2f} сек")
 
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        rect_w, rect_h = self.rect1.width(), self.rect1.height()
+
+        center_x = width // 2
+        center_y = height // 2
+
+        new_x = center_x - rect_w // 2
+        new_y = center_y - rect_h // 2
+
+        new_x = max(0, min(new_x, width - rect_w))
+        new_y = max(0, min(new_y, height - rect_h))
+
+        self.rect1 = QRect(new_x, new_y, rect_w, rect_h)
+
         out_width, out_height = 1080, 1920
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        
+
         if self.rect1.height() < self.rect2.height():
             top_rect, bottom_rect = self.rect1, self.rect2
         else:
@@ -1002,15 +1015,15 @@ class VideoCuttingThread(QThread):
 
         frame_index = 0
         part_number = 1
-        frames_per_part = self.part_duration * fps
+        frames_per_part = int(self.part_duration * fps)
         current_part_frames = 0
-        
+
         temp_folder = os.path.join(self.save_folder, "temp_parts")
         os.makedirs(temp_folder, exist_ok=True)
-        
+
         out_path = os.path.join(temp_folder, f"part_{part_number}.mp4")
         out = cv2.VideoWriter(out_path, fourcc, fps, (out_width, out_height))
-        
+
         while self.running:
             ret, frame = cap.read()
             if not ret:
@@ -1041,7 +1054,7 @@ class VideoCuttingThread(QThread):
 
             combined_frame = np.vstack((top_resized, bottom_resized))
             out.write(combined_frame)
-            
+
             current_part_frames += 1
             frame_index += 1
 
@@ -1053,7 +1066,7 @@ class VideoCuttingThread(QThread):
                 start_time = (part_number - 1) * self.part_duration
                 self.add_audio_to_video(out_path, final_part_path, start_time)
                 os.remove(out_path)
-                
+
                 if frame_index < total_frames:
                     part_number += 1
                     current_part_frames = 0
@@ -1064,7 +1077,7 @@ class VideoCuttingThread(QThread):
             self.progress_update.emit(progress_percent)
 
         cap.release()
-        
+
         try:
             for f in os.listdir(temp_folder):
                 os.remove(os.path.join(temp_folder, f))
@@ -1072,15 +1085,11 @@ class VideoCuttingThread(QThread):
             logger.info("Временные файлы удалены")
         except Exception as e:
             logger.warning(f"Не удалось удалить временные файлы: {e}")
-            
+
         self.progress_update.emit(100)
         logger.info("Нарезка видео на части завершена")
         
     def add_audio_to_video(self, input_video_path, output_video_path, start_time):
-        """
-        Добавляет аудиодорожку из исходного видео к видео без звука.
-        Использует ffmpeg (должен быть установлен в системе и доступен из PATH).
-        """
         command = [
             'ffmpeg',
             '-y',
@@ -1107,7 +1116,6 @@ class VideoCuttingThread(QThread):
         
 
     def stop(self):
-        """Остановка потока"""
         self.running = False    
         
 if __name__ == "__main__":
