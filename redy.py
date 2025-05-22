@@ -166,6 +166,23 @@ class MainWindow(QMainWindow):
                 width: 10px;
             }
         """)
+        
+    def detect_face_area(self, frame):
+
+        mp_face_detection = mp.solutions.face_detection
+        with mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5) as face_detection:
+            results = face_detection.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if results.detections:
+                detection = results.detections[0]
+                bboxC = detection.location_data.relative_bounding_box
+                h, w, _ = frame.shape
+                x = int(bboxC.xmin * w)
+                y = int(bboxC.ymin * h)
+                width = int(bboxC.width * w)
+                height = int(bboxC.height * h)
+                return x, y, width, height
+        return None
+
 
 class TwitchClipFinderTab(QWidget):
     def __init__(self):
@@ -585,46 +602,59 @@ class VideoEditorTab(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Выберите видео", "", "Видео файлы (*.mp4 *.avi *.mov)")
         if not path:
             return
+
         self.video_path = path
         self.cap = cv2.VideoCapture(self.video_path)
+        ret, frame = self.cap.read()
         if not self.cap.isOpened():
             QMessageBox.critical(self, "Ошибка", "Не удалось открыть видео")
             return
-        ret, frame = self.cap.read()
         if not ret:
             QMessageBox.critical(self, "Ошибка", "Не удалось прочитать кадр")
             return
-        
+
         self.frame = frame
+        self.showFrameOnCanvas(frame)  # Показываем кадр, чтобы QLabel обновился
+
+        # Ждём завершения отображения QLabel
+        QApplication.processEvents()
+
+        # Размеры исходного кадра
+        frame_h, frame_w = self.frame.shape[:2]
+        canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
+
+        # Масштаб и отступы
+        scale = min(canvas_w / frame_w, canvas_h / frame_h)
+        scaled_frame_w = int(frame_w * scale)
+        scaled_frame_h = int(frame_h * scale)
+        offset_x = (canvas_w - scaled_frame_w) // 2
+        offset_y = (canvas_h - scaled_frame_h) // 2
+
         face_rect = self.detect_face_area(self.frame)
         if face_rect:
             x, y, w, h = face_rect
 
-            frame_h, frame_w = self.frame.shape[:2]
-            canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
-
-            scale = min(canvas_w / frame_w, canvas_h / frame_h)
-            scaled_frame_w = int(frame_w * scale)
-            scaled_frame_h = int(frame_h * scale)
-            offset_x = (canvas_w - scaled_frame_w) // 2
-            offset_y = (canvas_h - scaled_frame_h) // 2
-
+            # Масштабируем координаты
             scaled_x = int(x * scale + offset_x)
             scaled_y = int(y * scale + offset_y)
             scaled_w = int(w * scale)
             scaled_h = int(h * scale)
 
-            self.area1.move(scaled_x, scaled_y)
-            self.area1.setFixedSize(scaled_w, scaled_h)
+            # Устанавливаем позицию и размер области
+            self.area1.setParent(self.canvas)
+            self.area1.setGeometry(scaled_x, scaled_y, scaled_w, scaled_h)
             self.area1.rect = QRect(0, 0, scaled_w, scaled_h)
             self.area1.update()
+            self.area1.show()
+
             self.current_rect1 = QRect(scaled_x, scaled_y, scaled_w, scaled_h)
-        self.showFrameOnCanvas(frame)
+
         self.save_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.progress.setValue(0)
         self.updatePreview()
         logger.info(f"Видео загружено: {path}")
+
     
     def detect_person_region(self, frame):
         mp_pose = mp.solutions.pose
@@ -662,8 +692,8 @@ class VideoEditorTab(QWidget):
         self.canvas.setPixmap(QPixmap.fromImage(scaled))
 
         # После обновления фона сообщаем DraggableRect обновить размер (на случай ресайза окна)
-        self.area1.setGeometry(0, 0, self.canvas.width(), self.canvas.height())
-        self.area2.setGeometry(0, 0, self.canvas.width(), self.canvas.height())
+        self.area1.resize(self.canvas.size())
+        self.area2.resize(self.canvas.size())
 
         # Перерисовываем области (чтобы были поверх)
         self.area1.update()
@@ -812,7 +842,6 @@ class DraggableRect(QWidget):
         self.setMouseTracking(True)
         self.controller = controller
         self.color = color
-        self.rect = QRect(0, 0, rect.width(), rect.height())
         self.dragging = False
         self.resizing = False
         self.resize_margin = 10
@@ -832,12 +861,13 @@ class DraggableRect(QWidget):
         pen = QPen(self.color.darker(), 2)
         painter.setPen(pen)
         painter.setBrush(self.color)
-        painter.drawRect(self.rect)
-        
-        # Рисуем квадратик для ресайза
+
+        rect = QRect(0, 0, self.width(), self.height())
+        painter.drawRect(rect)
+
         resize_rect = QRect(
-            self.rect.right() - self.resize_margin,
-            self.rect.bottom() - self.resize_margin,
+            rect.right() - self.resize_margin,
+            rect.bottom() - self.resize_margin,
             self.resize_margin,
             self.resize_margin
         )
@@ -845,11 +875,11 @@ class DraggableRect(QWidget):
         
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
-        if QRect(0, 0, self.rect.width(), self.rect.height()).contains(pos):
+        if QRect(0, 0, self.width(), self.height()).contains(pos):
             self.dragging = True
             self.drag_start_pos = pos
             self.rect_start_pos = self.pos()
-            if abs(pos.x() - self.rect.width()) <= self.resize_margin and abs(pos.y() - self.rect.height()) <= self.resize_margin:
+            if abs(pos.x() - self.width()) <= self.resize_margin and abs(pos.y() - self.height()) <= self.resize_margin:
                 self.resizing = True
             else:
                 self.resizing = False
@@ -862,32 +892,27 @@ class DraggableRect(QWidget):
 
         if self.dragging:
             if self.resizing:
-                new_width = pos.x()
-                new_height = pos.y()
-                new_width = max(20, new_width)
-                new_height = max(20, new_height)
+                new_width = max(20, pos.x())
+                new_height = max(20, pos.y())
                 max_width = self.parent().width() - self.x()
                 max_height = self.parent().height() - self.y()
                 new_width = min(new_width, max_width)
                 new_height = min(new_height, max_height)
-                self.rect.setWidth(new_width)
-                self.rect.setHeight(new_height)
-                self.setFixedSize(new_width, new_height)  # обновляем размер виджета
+                self.setFixedSize(new_width, new_height)
             else:
                 delta = pos - self.drag_start_pos
                 new_pos = self.rect_start_pos + delta
                 new_x = max(0, min(new_pos.x(), self.parent().width() - self.width()))
                 new_y = max(0, min(new_pos.y(), self.parent().height() - self.height()))
                 self.move(new_x, new_y)
-            
-            # Обновляем без лишних вызовов update()
+
             if self.controller:
                 new_rect = QRect(self.x(), self.y(), self.width(), self.height())
                 self.controller.updateRect(self, new_rect, was_resized=self.resizing)
         else:
-            if abs(pos.x() - self.rect.width()) <= self.resize_margin and abs(pos.y() - self.rect.height()) <= self.resize_margin:
+            if abs(pos.x() - self.width()) <= self.resize_margin and abs(pos.y() - self.height()) <= self.resize_margin:
                 self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            elif QRect(0, 0, self.rect.width(), self.rect.height()).contains(pos):
+            elif QRect(0, 0, self.width(), self.height()).contains(pos):
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
