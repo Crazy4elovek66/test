@@ -6,8 +6,8 @@ import subprocess
 import cv2
 import numpy as np
 import logging
-import math
 import mediapipe as mp
+import math
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem, QLineEdit, 
@@ -18,6 +18,8 @@ from PyQt6.QtGui import (
     QColor, QPainter, QPen, QImage, QPixmap, QIcon, 
     QAction, QDesktopServices
 )
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtCore import Qt, QRect, QPoint, QUrl, QThread, pyqtSignal, QSize
 from dotenv import load_dotenv
 import vlc
@@ -41,7 +43,74 @@ DEFAULT_CHANNELS = os.getenv('CHANNELS', '')
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(static_image_mode=True)
 
+def sanitize_filename(name):
+    return re.sub(r'[\\/:"*?<>|]+', '_', name)   
 
+class VideoPlayer(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Dual Video Player")
+        self.resize(1280, 720)
+
+        # Виджеты для вывода видео
+        self.video_widget_main = QVideoWidget()     # 16:9
+        self.video_widget_vertical = QVideoWidget() # 9:16
+
+        # Основной плеер (16:9)
+        self.player_main = QMediaPlayer()
+        self.audio_output_main = QAudioOutput()
+        self.player_main.setAudioOutput(self.audio_output_main)
+        self.player_main.setVideoOutput(self.video_widget_main)
+
+        # Вертикальный плеер (9:16)
+        self.player_vertical = QMediaPlayer()
+        self.player_vertical.setVideoOutput(self.video_widget_vertical)
+
+        # Кнопки управления
+        self.open_button = QPushButton("Открыть видео")
+        self.play_button = QPushButton("▶")
+        self.pause_button = QPushButton("⏸")
+
+        self.open_button.clicked.connect(self.open_file)
+        self.play_button.clicked.connect(self.play_video)
+        self.pause_button.clicked.connect(self.pause_video)
+
+        # Макеты
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.open_button)
+        button_layout.addWidget(self.play_button)
+        button_layout.addWidget(self.pause_button)
+
+        video_layout = QHBoxLayout()
+        video_layout.addWidget(self.video_widget_main, stretch=3)
+        video_layout.addWidget(self.video_widget_vertical, stretch=2)
+
+        layout = QVBoxLayout()
+        layout.addLayout(video_layout)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def open_file(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Выберите видео", "", "Видео файлы (*.mp4 *.avi *.mov)")
+        if path:
+            self.load_video(path)
+
+    def load_video(self, path):
+        url = QUrl.fromLocalFile(path)
+        self.player_main.setSource(url)
+        self.player_vertical.setSource(url)
+
+    def play_video(self):
+        self.player_main.play()
+        self.player_vertical.play()
+
+    def pause_video(self):
+        self.player_main.pause()
+        self.player_vertical.pause()
+        
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -181,7 +250,7 @@ class MainWindow(QMainWindow):
                 width = int(bboxC.width * w)
                 height = int(bboxC.height * h)
                 return x, y, width, height
-        return None
+        return None        
 
 
 class TwitchClipFinderTab(QWidget):
@@ -339,10 +408,7 @@ class TwitchClipFinderTab(QWidget):
 
             self.table.setCellWidget(row_pos, 5, button)
 
-        self.status_label.setText(f"Найдено клипов: {len(sorted_clips)}")
-        
-    def sanitize_filename(name):
-        return re.sub(r'[\\/:"*?<>|]+', '_', name)
+        self.status_label.setText(f"Найдено клипов: {len(sorted_clips)}")      
     
     def download_selected_clips(self):
         selected_clips = []
@@ -375,7 +441,6 @@ class TwitchClipFinderTab(QWidget):
         errors = []
         for clip in selected_clips:
             try:
-                # Формируем имя файла: <ник> - <название>.mp4
                 filename = f"{clip['channel']} - {clip['title']}.mp4"
                 filename = sanitize_filename(filename)
                 save_path = os.path.join(save_dir, filename)
@@ -384,37 +449,12 @@ class TwitchClipFinderTab(QWidget):
                 errors.append(clip['url'])
 
         if errors:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось скачать клипы:\n{errors}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось скачать клипы:\n" + "\n".join(errors))
         else:
             QMessageBox.information(self, "Готово", "Выбранные клипы успешно скачаны.")
+        
         self.status_label.setText("Готово.")
-
-        if not selected_clips:
-            QMessageBox.information(self, "Информация", "Не выбраны клипы для скачивания.")
-            return
-
-        save_dir = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
-        if not save_dir:
-            return
-
-        self.status_label.setText("Скачивание выбранных клипов...")
-        QApplication.processEvents()
-
-        errors = []
-        for url in selected_clips:
-            try:
-                # Формируем имя файла из url (можно улучшить)
-                filename = url.split("/")[-1] + ".mp4"
-                save_path = os.path.join(save_dir, filename)
-                subprocess.run(["yt-dlp", "-o", save_path, url], check=True)
-            except subprocess.CalledProcessError as e:
-                errors.append(url)
-
-        if errors:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось скачать клипы:\n{errors}")
-        else:
-            QMessageBox.information(self, "Готово", "Выбранные клипы успешно скачаны.")
-        self.status_label.setText("Готово.")    
+   
     
     def preview_clip(self, clip_url):
         try:
@@ -513,6 +553,8 @@ class VideoEditorTab(QWidget):
         self.current_rect2 = QRect(self.rect2)
         
         self.setup_ui()
+        self.video_player = VideoPlayer()
+        self.right_panel.addWidget(self.video_player)
         self.video_path = None
         self.cap = None
         self.frame = None
@@ -545,7 +587,7 @@ class VideoEditorTab(QWidget):
         left_panel.addLayout(tool_panel)
         
         # Холст для видео
-        self.canvas = QLabel()
+        self.canvas = QVideoWidget()
         self.canvas.setFixedSize(960, 540)
         self.canvas.setStyleSheet("background-color: black;")
         left_panel.addWidget(self.canvas)
@@ -571,27 +613,29 @@ class VideoEditorTab(QWidget):
         left_panel.addWidget(self.progress)
         
         # Правая панель (превью)
-        right_panel = QVBoxLayout()
-        right_panel.setSpacing(10)
+        self.right_panel = QVBoxLayout()
+        self.right_panel.setSpacing(10)
         
         preview_label = QLabel("Preview (9:16)")
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_panel.addWidget(preview_label)
+        self.right_panel.addWidget(preview_label)
         
         self.preview_canvas = QLabel()
         self.preview_canvas.setFixedSize(360, 640)
         self.preview_canvas.setStyleSheet("background-color: black;")
-        right_panel.addWidget(self.preview_canvas)
+        self.right_panel.addWidget(self.preview_canvas)
         
         # Добавляем обе панели в основной layout
         main_layout.addLayout(left_panel, 70)
-        main_layout.addLayout(right_panel, 30)
+        main_layout.addLayout(self.right_panel, 30)
         
         # Создаем DraggableRect после установки layout
         self.area1 = DraggableRect(self.canvas, self.rect1, controller=self, color=QColor(0, 255, 0, 120))
         self.area2 = DraggableRect(self.canvas, self.rect2, controller=self, color=QColor(255, 0, 0, 120))
         self.area1.show()
         self.area2.show()
+        self.area1.raise_()
+        self.area2.raise_()
         
         self.setLayout(main_layout)
 
@@ -609,55 +653,51 @@ class VideoEditorTab(QWidget):
                 height = int(bbox.height * h)
                 return x, y, width, height
         return None
-   
+
     def loadVideo(self):
         path, _ = QFileDialog.getOpenFileName(self, "Выберите видео", "", "Видео файлы (*.mp4 *.avi *.mov)")
         if not path:
             return
 
         self.video_path = path
-        self.cap = cv2.VideoCapture(self.video_path)
-        ret, frame = self.cap.read()
-        if not self.cap.isOpened():
-            QMessageBox.critical(self, "Ошибка", "Не удалось открыть видео")
-            return
+
+        # Открытие видео через QMediaPlayer
+        url = QUrl.fromLocalFile(self.video_path)
+        self.video_player.player_main.setSource(url)
+        self.video_player.player_vertical.setSource(url)
+        self.video_player.audio_output_main.setVolume(50)  # исправлено
+        self.video_player.player_main.play()
+
+        # Не нужен OpenCV для показа кадра, но для распознавания лица и положения области ты можешь всё так же читать первый кадр через OpenCV:
+        cap = cv2.VideoCapture(self.video_path)
+        ret, frame = cap.read()
         if not ret:
-            QMessageBox.critical(self, "Ошибка", "Не удалось прочитать кадр")
+            QMessageBox.critical(self, "Ошибка", "Не удалось прочитать кадр для распознавания")
             return
+        cap.release()
 
-        self.frame = frame
-        self.showFrameOnCanvas(frame)  # Показываем кадр, чтобы QLabel обновился
-
-        # Ждём завершения отображения QLabel
-        QApplication.processEvents()
-
-        # Размеры исходного кадра
-        frame_h, frame_w = self.frame.shape[:2]
-        canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
-
-        # Масштаб и отступы
-        scale = min(canvas_w / frame_w, canvas_h / frame_h)
-        scaled_frame_w = int(frame_w * scale)
-        scaled_frame_h = int(frame_h * scale)
-        offset_x = (canvas_w - scaled_frame_w) // 2
-        offset_y = (canvas_h - scaled_frame_h) // 2
-
-        face_rect = self.detect_face_area(self.frame)
+        # Используем frame для детекции лица и позиционирования draggable-региона:
+        face_rect = self.detect_face_area(frame)
         if face_rect:
             x, y, w, h = face_rect
+            # Получаем размеры видео (кадра)
+            frame_h, frame_w = frame.shape[:2]
+            canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
 
-            # Центр лица на исходном кадре
+            scale = min(canvas_w / frame_w, canvas_h / frame_h)
+            scaled_frame_w = int(frame_w * scale)
+            scaled_frame_h = int(frame_h * scale)
+            offset_x = (canvas_w - scaled_frame_w) // 2
+            offset_y = (canvas_h - scaled_frame_h) // 2
+
             cx = x + w / 2
             cy = y + h / 2
 
-            # Центр лица в координатах canvas
             scaled_cx = int(cx * scale + offset_x)
             scaled_cy = int(cy * scale + offset_y)
 
-            # Фиксированный размер области в пикселях canvas (настрой)
-            fixed_w, fixed_h = 320, 320  # или другой размер по желанию
+            fixed_w, fixed_h = 320, 320  # настрой размер области
 
-            # Координаты левого верхнего угла области (чтобы центр был в scaled_cx, scaled_cy)
             area_x = int(scaled_cx - fixed_w / 2)
             area_y = int(scaled_cy - fixed_h / 2)
 
@@ -669,14 +709,14 @@ class VideoEditorTab(QWidget):
 
             self.current_rect1 = QRect(area_x, area_y, fixed_w, fixed_h)
 
-
-        # Красная область всегда по центру с соотношением 16:9
+        # Красная область, как у тебя, например:
         self.setRedAreaCenter()
 
         self.save_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.progress.setValue(0)
         self.updatePreview()
+
         logger.info(f"Видео загружено: {path}")
     
     def setRedAreaCenter(self):
@@ -1013,11 +1053,7 @@ class VideoCuttingThread(QThread):
             ]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        os.remove(input_path)
-        
-        
-    def sanitize_filename(name):
-        return re.sub(r'[\\/:"*?<>|]+', '_', name)    
+        os.remove(input_path) 
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
@@ -1151,10 +1187,7 @@ class VideoCuttingThread(QThread):
             logger.info("Аудио успешно добавлено")
         except subprocess.CalledProcessError as e:
             logger.error(f"Ошибка при добавлении аудио: {e.stderr.decode()}")
-            
-    def sanitize_filename(name):
-        return re.sub(r'[\\/:"*?<>|]+', '_', name)
-        
+                   
 
     def stop(self):
         self.running = False    
