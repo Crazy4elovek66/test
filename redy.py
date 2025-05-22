@@ -12,15 +12,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem, QLineEdit, 
     QHeaderView, QMessageBox, QFileDialog, QCheckBox, QFrame, 
-    QProgressBar, QToolBar, QStatusBar, QStyle
+    QProgressBar, QToolBar, QStatusBar, QStyle, QStackedLayout,QGraphicsView, QGraphicsScene, QGraphicsItem
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QImage, QPixmap, QIcon, 
     QAction, QDesktopServices
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QVideoWidget
-from PyQt6.QtCore import Qt, QRect, QPoint, QUrl, QThread, pyqtSignal, QSize
+from PyQt6.QtMultimediaWidgets import QVideoWidget, QGraphicsVideoItem
+from PyQt6.QtCore import Qt, QRect, QPoint, QUrl, QThread, pyqtSignal, QSize, QTimer, QSizeF, QRectF
+from PyQt6.QtGui import QBrush, QColor
 from dotenv import load_dotenv
 import vlc
 import mediapipe as mp
@@ -83,8 +84,8 @@ class VideoPlayer(QWidget):
         button_layout.addWidget(self.pause_button)
 
         video_layout = QHBoxLayout()
-        video_layout.addWidget(self.video_widget_main, stretch=3)
-        video_layout.addWidget(self.video_widget_vertical, stretch=2)
+        video_layout.addWidget(self.video_widget_main)          # основной холст 16:9
+        video_layout.addWidget(self.video_widget_vertical)  # вертикальный предпросмотр 9:16
 
         layout = QVBoxLayout()
         layout.addLayout(video_layout)
@@ -544,100 +545,124 @@ class PreviewWindow(QWidget):
 class VideoEditorTab(QWidget):
     def __init__(self):
         super().__init__()
-        # Инициализация прямоугольников
-        self.rect1 = QRect(100, 100, 300, 200)  # Первый прямоугольник
-        self.rect2 = QRect(500, 200, 300, 200)  # Второй прямоугольник
-        
-        # Текущие положения прямоугольников
-        self.current_rect1 = QRect(self.rect1)
-        self.current_rect2 = QRect(self.rect2)
-        
-        self.setup_ui()
-        self.video_player = VideoPlayer()
-        self.right_panel.addWidget(self.video_player)
         self.video_path = None
         self.cap = None
         self.frame = None
         self.save_folder = None
         self.cutting_thread = None
         self.frame_for_display = None
-    
+        self.playing = False
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        
+        # Инициализация прямоугольников
+        self.rect1 = QRectF(100, 100, 300, 200)  # Первый прямоугольник (зеленый)
+        self.rect2 = QRectF(500, 200, 300, 200)  # Второй прямоугольник (красный)
+        
+        self.setup_ui()
+
     def setup_ui(self):
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(15)
-        
-        # Левая панель (основные элементы управления)
+
+        # Левая панель (16:9)
         left_panel = QVBoxLayout()
         left_panel.setSpacing(15)
-        
+
         # Панель инструментов
         tool_panel = QHBoxLayout()
         self.load_btn = QPushButton("Load Video")
         self.load_btn.setIcon(QIcon.fromTheme("document-open"))
-        self.load_btn.clicked.connect(self.loadVideo)
+        self.load_btn.clicked.connect(self.load_video)
         tool_panel.addWidget(self.load_btn)
-        
+
         self.save_btn = QPushButton("Set Output")
         self.save_btn.setIcon(QIcon.fromTheme("folder"))
         self.save_btn.clicked.connect(self.selectSaveFolder)
         self.save_btn.setEnabled(False)
         tool_panel.addWidget(self.save_btn)
-        
+
+        # Кнопки управления воспроизведением
+        self.play_btn = QPushButton("▶")
+        self.play_btn.clicked.connect(self.toggle_playback)
+        self.play_btn.setEnabled(False)
+        tool_panel.addWidget(self.play_btn)
+
         left_panel.addLayout(tool_panel)
-        
-        # Холст для видео
-        self.canvas = QVideoWidget()
-        self.canvas.setFixedSize(960, 540)
-        self.canvas.setStyleSheet("background-color: black;")
-        left_panel.addWidget(self.canvas)
-        
-        # Панель управления процессом
+
+        # Основной холст для видео 16:9
+        self.scene = QGraphicsScene()
+        self.canvas_view = QGraphicsView(self.scene)
+        self.canvas_view.setFixedSize(960, 540)  # 16:9
+        self.canvas_view.setStyleSheet("background-color: black;")
+
+        # Видеоэлемент
+        self.video_item = QGraphicsVideoItem()
+        self.video_item.setPos(0, 0)
+        self.video_item.setSize(QSizeF(960, 540))
+        self.scene.addItem(self.video_item)
+
+        # Прямоугольники для выделения областей
+        self.area1_item = self.scene.addRect(
+            self.rect1, 
+            QPen(QColor(0, 255, 0, 180), 2), 
+            QBrush(QColor(0, 255, 0, 60))
+        )
+        self.area2_item = self.scene.addRect(
+            self.rect2, 
+            QPen(QColor(255, 0, 0, 180), 2), 
+            QBrush(QColor(255, 0, 0, 60))
+        )
+
+        # Сделаем прямоугольники перемещаемыми
+        self.area1_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.area1_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.area2_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.area2_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+
+        left_panel.addWidget(self.canvas_view)
+
+        # Панель управления обработкой
         control_panel = QHBoxLayout()
         self.start_btn = QPushButton("Start Processing")
         self.start_btn.setIcon(QIcon.fromTheme("media-playback-start"))
         self.start_btn.clicked.connect(self.startCutting)
         self.start_btn.setEnabled(False)
         control_panel.addWidget(self.start_btn)
-        
+
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
         self.stop_btn.clicked.connect(self.stopCutting)
         self.stop_btn.setEnabled(False)
         control_panel.addWidget(self.stop_btn)
-        
+
         left_panel.addLayout(control_panel)
-        
+
         # Прогресс бар
         self.progress = QProgressBar()
         left_panel.addWidget(self.progress)
-        
-        # Правая панель (превью)
-        self.right_panel = QVBoxLayout()
-        self.right_panel.setSpacing(10)
-        
+
+        # Правая панель - предпросмотр 9:16
+        right_panel = QVBoxLayout()
+        right_panel.setSpacing(10)
+
         preview_label = QLabel("Preview (9:16)")
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.right_panel.addWidget(preview_label)
-        
+        right_panel.addWidget(preview_label)
+
         self.preview_canvas = QLabel()
-        self.preview_canvas.setFixedSize(360, 640)
+        self.preview_canvas.setFixedSize(360, 640)  # 9:16
         self.preview_canvas.setStyleSheet("background-color: black;")
-        self.right_panel.addWidget(self.preview_canvas)
-        
-        # Добавляем обе панели в основной layout
-        main_layout.addLayout(left_panel, 70)
-        main_layout.addLayout(self.right_panel, 30)
-        
-        # Создаем DraggableRect после установки layout
-        self.area1 = DraggableRect(self.canvas, self.rect1, controller=self, color=QColor(0, 255, 0, 120))
-        self.area2 = DraggableRect(self.canvas, self.rect2, controller=self, color=QColor(255, 0, 0, 120))
-        self.area1.show()
-        self.area2.show()
-        self.area1.raise_()
-        self.area2.raise_()
-        
+        right_panel.addWidget(self.preview_canvas)
+
+        # Добавляем панели в основной макет
+        main_layout.addLayout(left_panel, 70)  # 70% ширины
+        main_layout.addLayout(right_panel, 30)  # 30% ширины
         self.setLayout(main_layout)
+
+        # Подключаем сигналы изменения прямоугольников
+        self.scene.selectionChanged.connect(self.update_preview)
 
     def detect_face_area(self, frame):
         mp_face = mp.solutions.face_detection
@@ -654,131 +679,154 @@ class VideoEditorTab(QWidget):
                 return x, y, width, height
         return None
 
-    def loadVideo(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выберите видео", "", "Видео файлы (*.mp4 *.avi *.mov)")
+    def load_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите видео", "", 
+            "Видео файлы (*.mp4 *.avi *.mov)"
+        )
         if not path:
             return
-
+            
         self.video_path = path
-
-        # Открытие видео через QMediaPlayer
-        url = QUrl.fromLocalFile(self.video_path)
-        self.video_player.player_main.setSource(url)
-        self.video_player.player_vertical.setSource(url)
-        self.video_player.audio_output_main.setVolume(50)  # исправлено
-        self.video_player.player_main.play()
-
-        # Не нужен OpenCV для показа кадра, но для распознавания лица и положения области ты можешь всё так же читать первый кадр через OpenCV:
-        cap = cv2.VideoCapture(self.video_path)
-        ret, frame = cap.read()
+        self.cap = cv2.VideoCapture(path)
+        
+        # Устанавливаем видео в QMediaPlayer
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoOutput(self.video_item)
+        self.media_player.setSource(QUrl.fromLocalFile(path))
+        
+        # Получаем первый кадр для обработки
+        ret, frame = self.cap.read()
         if not ret:
-            QMessageBox.critical(self, "Ошибка", "Не удалось прочитать кадр для распознавания")
+            QMessageBox.critical(self, "Ошибка", "Не удалось прочитать видео")
             return
-        cap.release()
-
-        # Используем frame для детекции лица и позиционирования draggable-региона:
+            
+        self.frame = frame
+        self.show_frame_on_canvas(frame)
+        
+        # Автоматически определяем положение лица
         face_rect = self.detect_face_area(frame)
         if face_rect:
             x, y, w, h = face_rect
-            # Получаем размеры видео (кадра)
-            frame_h, frame_w = frame.shape[:2]
-            canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
-
-            scale = min(canvas_w / frame_w, canvas_h / frame_h)
-            scaled_frame_w = int(frame_w * scale)
-            scaled_frame_h = int(frame_h * scale)
-            offset_x = (canvas_w - scaled_frame_w) // 2
-            offset_y = (canvas_h - scaled_frame_h) // 2
-
-            cx = x + w / 2
-            cy = y + h / 2
-
-            scaled_cx = int(cx * scale + offset_x)
-            scaled_cy = int(cy * scale + offset_y)
-
-            fixed_w, fixed_h = 320, 320  # настрой размер области
-
-            area_x = int(scaled_cx - fixed_w / 2)
-            area_y = int(scaled_cy - fixed_h / 2)
-
-            self.area1.setParent(self.canvas)
-            self.area1.setGeometry(area_x, area_y, fixed_w, fixed_h)
-            self.area1.rect = QRect(0, 0, fixed_w, fixed_h)
-            self.area1.update()
-            self.area1.show()
-
-            self.current_rect1 = QRect(area_x, area_y, fixed_w, fixed_h)
-
-        # Красная область, как у тебя, например:
-        self.setRedAreaCenter()
-
+            self.area1_item.setRect(QRectF(x, y, w, h))
+            
+        # Устанавливаем красную область по центру
+        self.set_red_area_center()
+        
         self.save_btn.setEnabled(True)
+        self.play_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.progress.setValue(0)
-        self.updatePreview()
-
-        logger.info(f"Видео загружено: {path}")
-    
-    def setRedAreaCenter(self):
-        canvas_w, canvas_h = self.canvas.width(), self.canvas.height()
-
-        aspect_ratio = 9 / 16
-
-        scale_factor = 0.99  # можно пробовать 0.9, 0.95 или 1.0
-
-        if canvas_w / canvas_h > aspect_ratio:
-            # canvas шире, ограничиваем по высоте
-            area_h = int(canvas_h * scale_factor)
-            area_w = int(area_h * aspect_ratio)
+        
+    def toggle_playback(self):
+        if not self.playing:
+            self.media_player.play()
+            self.timer.start(30)  # обновление каждые 30 мс
+            self.play_btn.setText("⏸")
+            self.playing = True
         else:
-            # canvas выше, ограничиваем по ширине
-            area_w = int(canvas_w * scale_factor)
-            area_h = int(area_w / aspect_ratio)
+            self.media_player.pause()
+            self.timer.stop()
+            self.play_btn.setText("▶")
+            self.playing = False
 
-        # Проверка на выход за границы (на всякий случай)
-        if area_w > canvas_w:
-            area_w = canvas_w
-            area_h = int(area_w / aspect_ratio)
-        if area_h > canvas_h:
-            area_h = canvas_h
-            area_w = int(area_h * aspect_ratio)
+    def update_frame(self):
+        if self.cap:
+            ret, frame = self.cap.read()
+            if ret:
+                self.frame = frame
+                self.show_frame_on_canvas(frame)
+                self.update_preview()
+            else:
+                # Достигнут конец видео
+                self.timer.stop()
+                self.play_btn.setText("▶")
+                self.playing = False
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Перемотка в начало
 
-        x = (canvas_w - area_w) // 2
-        y = (canvas_h - area_h) // 2
-
-        self.area2.setParent(self.canvas)
-        self.area2.setGeometry(x, y, area_w, area_h)
-        self.area2.rect = QRect(0, 0, area_w, area_h)
-        self.area2.update()
-        self.area2.show()
-
-        self.current_rect2 = QRect(x, y, area_w, area_h)
-            
-    def setInitialRect(self, rect: QRect):
-        if hasattr(self, "draggable_rect"):
-            self.draggable_rect.setRect(rect)
-            self.updatePreview()        
-            
-    def showFrameOnCanvas(self, frame):
-        # Конвертируем cv2 BGR в QImage
+    def show_frame_on_canvas(self, frame):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        self.frame_for_display = qt_image
+    
+    def set_red_area_center(self):
+        """Устанавливает красную область по центру с соотношением 9:16"""
+        canvas_width = self.canvas_view.width()
+        canvas_height = self.canvas_view.height()
+        
+        # Рассчитываем размеры для соотношения 9:16
+        area_width = min(canvas_width, int(canvas_height * 9/16))
+        area_height = min(canvas_height, int(canvas_width * 16/9))
+        
+        # Центрируем
+        x = (canvas_width - area_width) // 2
+        y = (canvas_height - area_height) // 2
+        
+        self.area2_item.setRect(QRectF(x, y, area_width, area_height))
+        self.update_preview()
 
-        # Масштабируем до размера canvas, сохраняя пропорции
-        scaled = qt_image.scaled(self.canvas.width(), self.canvas.height(), Qt.AspectRatioMode.KeepAspectRatio)
-        self.frame_for_display = scaled
-
-        self.canvas.setPixmap(QPixmap.fromImage(scaled))
-
-        # После обновления фона сообщаем DraggableRect обновить размер (на случай ресайза окна)
-        self.area1.resize(self.canvas.size())
-        self.area2.resize(self.canvas.size())
-
-        # Перерисовываем области (чтобы были поверх)
-        self.area1.update()
-        self.area2.update()
+    def update_preview(self):
+        if self.frame is None:
+            return
+            
+        frame_h, frame_w = self.frame.shape[:2]
+        canvas_w = self.canvas_view.width()
+        canvas_h = self.canvas_view.height()
+        
+        # Масштабируем координаты прямоугольников к размеру исходного кадра
+        def scale_rect(rect):
+            x = rect.x() * frame_w / canvas_w
+            y = rect.y() * frame_h / canvas_h
+            w = rect.width() * frame_w / canvas_w
+            h = rect.height() * frame_h / canvas_h
+            return QRect(int(x), int(y), int(w), int(h))
+            
+        rect1 = scale_rect(self.area1_item.rect())
+        rect2 = scale_rect(self.area2_item.rect())
+        
+        # Определяем порядок - меньший по высоте сверху
+        if rect1.height() < rect2.height():
+            top_rect, bottom_rect = rect1, rect2
+        else:
+            top_rect, bottom_rect = rect2, rect1
+            
+        # Вырезаем и масштабируем области
+        def crop_and_resize(rect, target_w, target_h):
+            x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+            crop = self.frame[y:y+h, x:x+w]
+            return cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            
+        preview_w = self.preview_canvas.width()
+        total_h = top_rect.height() + bottom_rect.height()
+        
+        if total_h == 0:
+            return
+            
+        top_h = int(preview_w * (top_rect.height() / top_rect.width()))
+        bottom_h = int(preview_w * (bottom_rect.height() / bottom_rect.width()))
+        
+        # Если суммарная высота больше доступной, масштабируем
+        if (top_h + bottom_h) > self.preview_canvas.height():
+            scale_factor = self.preview_canvas.height() / (top_h + bottom_h)
+            top_h = int(top_h * scale_factor)
+            bottom_h = int(bottom_h * scale_factor)
+            
+        top_img = crop_and_resize(top_rect, preview_w, top_h)
+        bottom_img = crop_and_resize(bottom_rect, preview_w, bottom_h)
+        
+        # Объединяем изображения
+        combined = np.vstack((top_img, bottom_img))
+        combined_rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
+        
+        # Отображаем в QLabel
+        h, w, ch = combined_rgb.shape
+        bytes_per_line = ch * w
+        qimg = QImage(combined_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        self.preview_canvas.setPixmap(QPixmap.fromImage(qimg))
 
     def selectSaveFolder(self):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
@@ -805,23 +853,22 @@ class VideoEditorTab(QWidget):
         scale_w = frame_w / disp_w
         scale_h = frame_h / disp_h
 
-        r1 = QRect(
-            int(self.current_rect1.left() * scale_w),
-            int(self.current_rect1.top() * scale_h),
-            int(self.current_rect1.width() * scale_w),
-            int(self.current_rect1.height() * scale_h),
-        )
-        r2 = QRect(
-            int(self.current_rect2.left() * scale_w),
-            int(self.current_rect2.top() * scale_h),
-            int(self.current_rect2.width() * scale_w),
-            int(self.current_rect2.height() * scale_h),
-        )
+        # Корректируем координаты с учетом масштаба
+        def scale_rect(rect):
+            return QRect(
+                int(rect.left() * scale_w),
+                int(rect.top() * scale_h),
+                int(rect.width() * scale_w),
+                int(rect.height() * scale_h),
+            )
+
+        r1 = scale_rect(self.current_rect1)
+        r2 = scale_rect(self.current_rect2)
 
         preview_width = self.preview_canvas.width()
         preview_height = self.preview_canvas.height()
 
-        # определяем порядок: меньший по высоте будет сверху (предположим "вебкамера")
+        # Определяем порядок — меньший по высоте сверху
         if r1.height() < r2.height():
             top_rect, bottom_rect = r1, r2
         else:
@@ -831,16 +878,23 @@ class VideoEditorTab(QWidget):
         if total_h == 0:
             return
 
-        # динамическое распределение высоты в превью
+        # Распределяем высоту пропорционально
         top_scaled_h = int(preview_height * (top_rect.height() / total_h))
         bottom_scaled_h = preview_height - top_scaled_h
 
-        def crop_and_resize(r, target_width, target_height):
+        def crop_and_resize(r, target_w, target_h):
             x, y, w, h = r.left(), r.top(), r.width(), r.height()
-            crop = self.frame[y:y+h, x:x+w]
+            # Защита от выхода за рамки исходного кадра
+            x = max(0, min(x, frame_w - 1))
+            y = max(0, min(y, frame_h - 1))
+            w = min(w, frame_w - x)
+            h = min(h, frame_h - y)
+            if w <= 0 or h <= 0:
+                return None
+            crop = self.frame[y:y + h, x:x + w]
             if crop.size == 0:
                 return None
-            return cv2.resize(crop, (target_width, target_height), interpolation=cv2.INTER_AREA)
+            return cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
         top_img = crop_and_resize(top_rect, preview_width, top_scaled_h)
         bottom_img = crop_and_resize(bottom_rect, preview_width, bottom_scaled_h)
@@ -858,30 +912,42 @@ class VideoEditorTab(QWidget):
         self.preview_canvas.setPixmap(QPixmap.fromImage(qimg))
 
     def startCutting(self):
-        if self.video_path is None or self.save_folder is None:
+        if not self.video_path or not self.save_folder:
             QMessageBox.warning(self, "Внимание", "Выберите видео и папку для сохранения")
+            return
+
+        if self.frame is None:
+            QMessageBox.warning(self, "Внимание", "Кадр видео не загружен")
             return
 
         frame_h, frame_w = self.frame.shape[:2]
         disp_w = self.canvas.width()
         disp_h = self.canvas.height()
 
+        if disp_w == 0 or disp_h == 0:
+            QMessageBox.warning(self, "Внимание", "Размер холста не может быть нулевым")
+            return
+
         scale_w = frame_w / disp_w
         scale_h = frame_h / disp_h
 
-        # Пересчёт координат прямоугольников из canvas в видео
-        real_rect1 = QRect(
-            int(self.current_rect1.left() * scale_w),
-            int(self.current_rect1.top() * scale_h),
-            int(self.current_rect1.width() * scale_w),
-            int(self.current_rect1.height() * scale_h)
-        )
-        real_rect2 = QRect(
-            int(self.current_rect2.left() * scale_w),
-            int(self.current_rect2.top() * scale_h),
-            int(self.current_rect2.width() * scale_w),
-            int(self.current_rect2.height() * scale_h)
-        )
+        # Пересчёт координат прямоугольников из canvas в координаты видео с защитой от отрицательных и выходящих за пределы
+        def scaled_rect(r):
+            left = max(0, int(r.left() * scale_w))
+            top = max(0, int(r.top() * scale_h))
+            width = int(r.width() * scale_w)
+            height = int(r.height() * scale_h)
+
+            # Ограничение размеров, чтобы не выходить за кадр видео
+            if left + width > frame_w:
+                width = frame_w - left
+            if top + height > frame_h:
+                height = frame_h - top
+
+            return QRect(left, top, width, height)
+
+        real_rect1 = scaled_rect(self.current_rect1)
+        real_rect2 = scaled_rect(self.current_rect2)
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -898,6 +964,7 @@ class VideoEditorTab(QWidget):
         self.cutting_thread.finished.connect(self.cuttingFinished)
         self.cutting_thread.start()
         logger.info("Начата нарезка видео")
+
 
     def stopCutting(self):
         if self.cutting_thread and self.cutting_thread.isRunning():
@@ -1012,7 +1079,7 @@ class VideoCuttingThread(QThread):
     
     def __init__(self, video_path, save_folder, rect1, rect2):
         super().__init__()
-        self.video_path = video_path
+        self.video_path = None
         self.save_folder = save_folder
         self.rect1 = rect1
         self.rect2 = rect2
